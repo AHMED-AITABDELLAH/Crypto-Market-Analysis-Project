@@ -1,0 +1,26 @@
+
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# IDE
+.idea/
+.vscode/
+
+# Environment variables
+.env
+.env.*
+!.env.example
+
+# Logs and generated data
+logs/
+*.log
+data/
+
+# OS
+.DS_Store
+Thumbs.db
