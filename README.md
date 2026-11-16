@@ -16,6 +16,6 @@ machine learning and data visualization.
 - Power BI
 - Docker
 
-## Project Status
+
 
 Currently under development.
