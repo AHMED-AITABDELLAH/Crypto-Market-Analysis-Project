@@ -3,7 +3,7 @@
 
 A Data Engineering and MLOps project focused on cryptocurrency
 market analysis, real-time data ingestion, ETL pipelines,
-machine learning and data visualization.
+machine learning and data visualization .
 
 ## Technologies
 
@@ -14,7 +14,7 @@ machine learning and data visualization.
 - Scikit-learn
 - MLflow
 - Power BI
-- Docker
+- Docker-compose
 
 
 
