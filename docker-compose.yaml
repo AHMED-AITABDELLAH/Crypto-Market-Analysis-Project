@@ -1,2 +1,310 @@
+# Plateforme Crypto Market Analysis : PostgreSQL, Kafka, Airflow 3, MLflow.
+#   Demarrage de base :  docker compose up -d
+#   Avec MLflow       :  docker compose --profile ml up -d
+#   Avec les UI       :  docker compose --profile ui up -d   (Kafka UI :8082, Adminer :8083)
+# Les services partagent automatiquement un meme reseau : ils se joignent par leur nom
+# (postgres, kafka, mlflow).
+
+name: crypto-platform
+
+x-airflow-common: &airflow-common
+  image: crypto-airflow:latest
+  build:
+    context: .
+    dockerfile: infrastructure/airflow/Dockerfile
+  user: "${AIRFLOW_UID:-50000}:0"
+  environment: &airflow-env
+    AIRFLOW__CORE__EXECUTOR: LocalExecutor
+    AIRFLOW__CORE__AUTH_MANAGER: airflow.providers.fab.auth_manager.fab_auth_manager.FabAuthManager
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres/airflow
+    AIRFLOW__CORE__FERNET_KEY: ${AIRFLOW_FERNET_KEY}
+    AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "true"
+    AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+    # Airflow 3 : les taches passent par l'API server (execution API) ; meme secret JWT partout
+    AIRFLOW__CORE__EXECUTION_API_SERVER_URL: http://airflow-apiserver:8080/execution/
+    AIRFLOW__API_AUTH__JWT_SECRET: ${AIRFLOW_JWT_SECRET}
+    AIRFLOW__API_AUTH__JWT_ISSUER: airflow
+    AIRFLOW__SCHEDULER__ENABLE_HEALTH_CHECK: "true"
+    PYTHONPATH: /opt/airflow/project:/opt/airflow/dags
+    # Base des donnees de marche (lue par airflow/dags/common/db.py)
+    MARKET_DB_HOST: postgres
+    MARKET_DB_PORT: "5432"
+    MARKET_DB_USER: ${POSTGRES_USER}
+    MARKET_DB_PASSWORD: ${POSTGRES_PASSWORD}
+    MARKET_DB_NAME: ${POSTGRES_DB}
+    # Kafka et MLflow
+    KAFKA_BOOTSTRAP_SERVERS: ${KAFKA_BOOTSTRAP_SERVERS:-kafka:29092}
+    KAFKA_TOPIC_RAW_KLINES: ${KAFKA_TOPIC_RAW_KLINES:-market.raw.klines}
+    MLFLOW_TRACKING_URI: http://mlflow:5000
+    # Binance
+    BINANCE_SYMBOL: ${BINANCE_SYMBOL:-BTCUSDT}
+    BINANCE_INTERVAL: ${BINANCE_INTERVAL:-1m}
+    BINANCE_REST_URL: ${BINANCE_REST_URL:-https://api.binance.com}
+    HISTORICAL_INITIAL_DAYS: ${HISTORICAL_INITIAL_DAYS:-1}
+    # Connexion Kafka pour l'event-driven scheduling (lue par le triggerer)
+    AIRFLOW_CONN_KAFKA_DEFAULT: '{"conn_type": "general", "extra": {"bootstrap.servers": "${KAFKA_BOOTSTRAP_SERVERS:-kafka:29092}", "group.id": "airflow-event-driven", "enable.auto.commit": false, "auto.offset.reset": "latest"}}'
+  volumes:
+    - ./airflow/dags:/opt/airflow/dags
+    - ./airflow/plugins:/opt/airflow/plugins
+    - ./airflow/config:/opt/airflow/config
+    - ./airflow/logs:/opt/airflow/logs
+    - ./services:/opt/airflow/project/services
+    - ./ml:/opt/airflow/project/ml
+
 services:
-  
+  # ---------------------------------------------------------------
+  # PostgreSQL : donnees du projet (crypto) + bases internes (airflow, mlflow)
+  # ---------------------------------------------------------------
+  postgres:
+    image: postgres:16
+    container_name: postgres
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    ports:
+      - "5432:5432"            # Power BI Desktop se connecte ici
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./database/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 10s
+      retries: 10
+      start_period: 10s
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------
+  # Kafka (mode KRaft, un seul noeud)
+  #   conteneurs : kafka:29092      ta machine : localhost:9092
+  # ---------------------------------------------------------------
+  kafka:
+    image: apache/kafka:3.8.0
+    container_name: kafka
+    ports:
+      - "9092:9092"
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: INTERNAL://:29092,EXTERNAL://:9092,CONTROLLER://:9093
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka:29092,EXTERNAL://localhost:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT,CONTROLLER:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_LOG_DIRS: /var/lib/kafka/data
+      KAFKA_HEAP_OPTS: "-Xms512m -Xmx512m"
+    volumes:
+      - kafka-data:/var/lib/kafka/data
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 > /dev/null 2>&1"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 30s
+    restart: unless-stopped
+
+  # Cree les topics du projet une seule fois, puis s'arrete
+  kafka-init:
+    image: apache/kafka:3.8.0
+    container_name: kafka-init
+    depends_on:
+      kafka:
+        condition: service_healthy
+    entrypoint: ["/bin/bash", "-c"]
+    command:
+      - |
+        for t in market.raw.klines market.validated.klines market.dlq; do
+          /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:29092 \
+            --create --if-not-exists --topic $$t --partitions 1 --replication-factor 1
+        done
+        /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:29092 --list
+    restart: "no"
+
+  # ---------------------------------------------------------------
+  # Airflow 3 : orchestration (api-server, scheduler, dag-processor, triggerer)
+  # Le triggerer surveille Kafka pour l'event-driven scheduling.
+  # ---------------------------------------------------------------
+  airflow-init:
+    <<: *airflow-common
+    container_name: airflow-init
+    entrypoint: /bin/bash
+    command:
+      - -c
+      - |
+        mkdir -p /opt/airflow/logs /opt/airflow/dags /opt/airflow/plugins /opt/airflow/config
+        /entrypoint airflow version
+    environment:
+      <<: *airflow-env
+      _AIRFLOW_DB_MIGRATE: "true"
+      _AIRFLOW_WWW_USER_CREATE: "true"
+      _AIRFLOW_WWW_USER_USERNAME: ${AIRFLOW_ADMIN_USER}
+      _AIRFLOW_WWW_USER_PASSWORD: ${AIRFLOW_ADMIN_PASSWORD}
+    user: "0:0"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  airflow-apiserver:
+    <<: *airflow-common
+    container_name: airflow-apiserver
+    command: api-server
+    ports:
+      - "8080:8080"
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:8080/api/v2/monitor/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+    depends_on:
+      postgres:
+        condition: service_healthy
+      airflow-init:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  airflow-scheduler:
+    <<: *airflow-common
+    container_name: airflow-scheduler
+    command: scheduler
+    healthcheck:
+      test: ["CMD-SHELL", 'airflow jobs check --job-type SchedulerJob --hostname "$${HOSTNAME}"']
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+    depends_on:
+      postgres:
+        condition: service_healthy
+      airflow-init:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  airflow-dag-processor:
+    <<: *airflow-common
+    container_name: airflow-dag-processor
+    command: dag-processor
+    healthcheck:
+      test: ["CMD-SHELL", 'airflow jobs check --job-type DagProcessorJob --hostname "$${HOSTNAME}"']
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+    depends_on:
+      postgres:
+        condition: service_healthy
+      airflow-init:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  airflow-triggerer:
+    <<: *airflow-common
+    container_name: airflow-triggerer
+    command: triggerer
+    healthcheck:
+      test: ["CMD-SHELL", 'airflow jobs check --job-type TriggererJob --hostname "$${HOSTNAME}"']
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+    depends_on:
+      postgres:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+      airflow-init:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------
+  # Producer : Binance WebSocket -> Kafka (service PERMANENT, hors Airflow)
+  # ---------------------------------------------------------------
+  ws-producer:
+    build:
+      context: .
+      dockerfile: infrastructure/streaming/Dockerfile
+    image: crypto-streaming:latest
+    container_name: ws-producer
+    command: python -m services.kafka.producer
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: ${KAFKA_BOOTSTRAP_SERVERS:-kafka:29092}
+      KAFKA_TOPIC_RAW_KLINES: ${KAFKA_TOPIC_RAW_KLINES:-market.raw.klines}
+      BINANCE_SYMBOL: ${BINANCE_SYMBOL:-BTCUSDT}
+      BINANCE_INTERVAL: ${BINANCE_INTERVAL:-1m}
+      BINANCE_WS_URL: ${BINANCE_WS_URL:-wss://stream.binance.com:9443}
+    volumes:
+      - ./services:/app/services
+    depends_on:
+      kafka:
+        condition: service_healthy
+      kafka-init:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------
+  # Adminer : consulter la base PostgreSQL dans le navigateur (profil ui)
+  # ---------------------------------------------------------------
+  adminer:
+    image: adminer:4
+    container_name: adminer
+    profiles: ["ui"]
+    ports:
+      - "8083:8080"
+    environment:
+      ADMINER_DEFAULT_SERVER: postgres
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------
+  # MLflow : suivi des experiences et des modeles (profil ml)
+  # ---------------------------------------------------------------
+  mlflow:
+    image: ghcr.io/mlflow/mlflow:v2.17.2
+    container_name: mlflow
+    profiles: ["ml"]
+    ports:
+      - "5000:5000"
+    command:
+      - /bin/bash
+      - -c
+      - |
+        pip install --no-cache-dir psycopg2-binary &&
+        mlflow server --host 0.0.0.0 --port 5000 \
+          --backend-store-uri postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/mlflow \
+          --artifacts-destination /mlflow/artifacts --serve-artifacts
+    volumes:
+      - mlflow-artifacts:/mlflow/artifacts
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------
+  # Interface web de Kafka (profil ui)
+  # ---------------------------------------------------------------
+  kafka-ui:
+    image: provectuslabs/kafka-ui:v0.7.2
+    container_name: kafka-ui
+    profiles: ["ui"]
+    ports:
+      - "8082:8080"
+    environment:
+      KAFKA_CLUSTERS_0_NAME: local
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:29092
+    depends_on:
+      kafka:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  postgres-data:
+  kafka-data:
+  mlflow-artifacts:
