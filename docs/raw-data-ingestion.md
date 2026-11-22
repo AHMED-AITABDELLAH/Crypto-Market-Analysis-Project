@@ -4,71 +4,102 @@
 
 `services/binance/websocket_client.py` connects to Binance's BTCUSDT 1-minute
 kline stream and publishes each original message to Kafka topic
-`market.raw.spot.klines`. It reconnects with a capped backoff after connection
-failures and keeps successful per-message delivery logs at debug level to avoid
-filling normal logs with repetitive entries.
+`market.raw.spot.klines`. It reconnects after connection failures and keeps
+successful per-message delivery logs at debug level.
 
-`services/kafka/bronze_consumer.py` consumes that topic and stores each original
-JSON event plus shared metadata in PostgreSQL Bronze. It loads its parameterized
-insert statement from `database/insert_raw_market_event.sql`; the Python file
-contains no SQL statement. This stage does not normalize candle fields or write
-to Silver or Gold.
+Airflow's Kafka Triggerer will watch that topic using an `AssetWatcher`. Its
+message filter accepts only final kline updates (`k.x == true`) and forwards the
+original JSON with Kafka topic, partition, and offset. The three callable tasks
+under `scripts/realtime_kline_ingestion/` validate the candle,
+store the unchanged event in Bronze, then transform it into `silver.candles`.
+The DAG itself has not been added yet.
 
-## Bronze destination
+Task scripts are grouped by DAG purpose. The current package is
+`realtime_kline_ingestion`; a future scheduled historical workflow can have a
+separate package such as `historical_kline_ingestion`. Compose mounts the root
+`scripts/` directory at `/opt/airflow/scripts`, so Airflow can import each
+purpose-specific package while the scripts stay outside the Airflow folder.
+The filter that runs before the DAG is `step_00_filter_closed_kline_event.py`.
+The tasks are prefixed `task_01`, `task_02`, and `task_03` to show validation,
+Bronze storage, and Silver ETL order. `database.py` is a shared helper for this
+package.
 
-On the first initialization of an empty PostgreSQL data volume, Compose mounts
-`database/001_initialize_schemas_and_bronze_table.sql`. It creates the `bronze`,
-`silver`, and `gold` schemas and the Bronze raw-events table. It does not create
-Silver or Gold tables yet; this phase stores raw events only.
+## Ordered SQL files
 
-`bronze.raw_market_events` contains these event and traceability columns:
+There is one database initializer: `database/001_initialize_database.sql`. It
+creates the `bronze`, `silver`, `gold`, and `airflow_metadata` schemas and the
+Bronze raw-events table. Add future schema and table initialization statements
+to this same file, in the order they should be applied. The first Silver table,
+`silver.candles`, is currently described there as a TODO for the database
+developer.
 
-- `event_type`
-- `symbol`
-- `source`
-- `event_time`
-- `ingestion_time`
-- `payload` (JSONB)
-- `kafka_topic`
-- `kafka_partition`
-- `kafka_offset`
+The numbered task SQL files follow the processing order:
 
-The table has a unique constraint on `(kafka_topic, kafka_partition,
-kafka_offset)`. The insert statement in `database/insert_raw_market_event.sql`
-uses that key to ignore a repeated event if the database write succeeded but
-Kafka did not record the offset commit. PostgreSQL runs initialization scripts
-only when its data volume is first created. If the volume already exists, the
-script must be applied manually for that database.
+1. `database/002_insert_raw_market_event.sql` — insert the unchanged event in
+   Bronze and return its row ID, including when the task is retried.
+2. `database/003_select_bronze_events_by_ids.sql` — retrieve the Bronze events
+   returned by step 1 for ETL.
+3. `database/004_upsert_silver_candle.sql` — store the normalized candle in
+   Silver using `(symbol, interval, open_time)` as its idempotency key.
 
-The consumer stores each Kafka message in a database transaction, then commits
-that message's Kafka offset. If a database write fails after startup, the
-consumer exits so Compose can restart it from the last committed offset. The
-unique Kafka coordinates prevent the already-written event from becoming a
-duplicate during that retry.
+The three task SQL files currently contain comments only for the database
+developer. Python task code contains no SQL queries. Bronze and Silver task
+writes will not work until those SQL statements and the Silver table are
+implemented.
 
-## Configuration and startup
+`bronze.raw_market_events` stores event type, symbol, source, event and
+ingestion times, original JSONB payload, and Kafka topic/partition/offset. The
+initialization script is safe to rerun because schema, table, and index creation
+uses `IF NOT EXISTS`. PostgreSQL only runs mounted initialization scripts when
+it first creates an empty data volume. For an existing database, apply it
+manually without deleting the volume:
 
-In Compose, PostgreSQL receives `POSTGRES_DB`, `POSTGRES_USER`, and
-`POSTGRES_PASSWORD` from `.env`. Compose builds the consumer's `DATABASE_URL`
-from those same values and connects it to the `postgres` service. Keep the local
-password URL-safe (letters, numbers, and underscores) so it works in the
-connection URL without encoding. For a direct Python run, set `DATABASE_URL`
-yourself. The consumer also accepts `KAFKA_BOOTSTRAP_SERVERS` and `KAFKA_TOPIC`;
-their defaults are `localhost:9092` and `market.raw.spot.klines`. Compose uses
-`kafka:29092` for the broker.
+```powershell
+docker compose up -d postgres
+docker compose exec postgres sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -f /docker-entrypoint-initdb.d/001_initialize_database.sql'
+```
 
-Compose starts Kafka and PostgreSQL first and waits for both health checks.
-The Binance producer depends on both services being healthy. The optional
-`kafka-bronze-consumer` service is enabled by the `database-ingestion` profile;
-it waits for Kafka and PostgreSQL to be healthy and for the producer container
-to start. Copy `.env.example` to `.env` if needed and change the local
-development password before starting the stack:
+The database developer should add the `silver.candles` table definition to
+`001_initialize_database.sql`. It needs `symbol`, `interval`, `open_time`,
+`close_time`, OHLC price columns, `volume`, and `is_closed`; use `TIMESTAMPTZ`
+for the candle times, exact numeric types for prices and volume, and a unique
+or primary key on `(symbol, interval, open_time)`.
+
+## Compose startup
+
+Copy `.env.example` to `.env` if needed and set a local PostgreSQL password
+using URL-safe characters (letters, numbers, and underscores):
 
 ```powershell
 if (-not (Test-Path .env)) { Copy-Item .env.example .env }
-docker compose --profile database-ingestion up --build
+docker compose up --build
 ```
 
-The profile keeps the consumer out of the normal Kafka and WebSocket startup.
-Compose's `service_started` condition confirms that the producer container
-started; it does not verify that Binance has connected or published its first event.
+This starts Kafka, PostgreSQL, and the Binance WebSocket producer. It does not
+write events to Bronze until an event-driven DAG is added and enabled.
+
+The optional `airflow` profile adds Airflow 3.4.0 with Kafka provider 3.0.0. It
+includes the API server, scheduler, DAG processor, and Triggerer. `LocalExecutor`
+keeps this local setup free of Redis and a separate Celery worker. Airflow
+metadata is stored in `airflow_metadata`; project task queries use `bronze` and
+`silver`.
+
+Start Airflow alongside the producer with:
+
+```powershell
+docker compose --profile airflow up --build
+```
+
+Open the Airflow UI at `http://localhost:8080`. The Simple Auth Manager creates
+a development password; find it in the API server logs:
+
+```powershell
+docker compose logs airflow-api-server
+```
+
+The DAG is intentionally not included yet. When added, it should use
+`KafkaMessageQueueTrigger` with callback
+`scripts.realtime_kline_ingestion.step_00_filter_closed_kline_event.capture_closed_kline`,
+then chain the three task functions. The trigger consumes Kafka; the tasks
+process the event payload Airflow provides. The standalone Bronze consumer is
+no longer part of this workflow.

@@ -1,0 +1,10 @@
+-- TODO for the database developer:
+-- Insert the normalized candle into silver.candles using the named parameters
+-- supplied by scripts/realtime_kline_ingestion/task_03_etl_klines_to_silver.py:
+-- symbol, interval, open_time, close_time, open_price, high_price, low_price,
+-- close_price, volume, and is_closed.
+--
+-- Use timezone-aware timestamp columns for open_time and close_time
+-- (TIMESTAMPTZ) and suitable exact numeric columns for prices and volume.
+-- Make retries idempotent with a unique/primary key on
+-- (symbol, interval, open_time), updating the existing candle on conflict.
