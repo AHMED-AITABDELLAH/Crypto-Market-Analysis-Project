@@ -27,11 +27,10 @@ package.
 ## Ordered SQL files
 
 There is one database initializer: `database/001_initialize_database.sql`. It
-creates the `bronze`, `silver`, `gold`, and `airflow_metadata` schemas and the
-Bronze raw-events table. Add future schema and table initialization statements
-to this same file, in the order they should be applied. The first Silver table,
-`silver.candles`, is currently described there as a TODO for the database
-developer.
+creates the `bronze`, `silver`, `gold`, and `airflow_metadata` schemas, the
+Bronze raw-events table, and the Silver candles table. Add future schema and
+table initialization statements to this same file, in the order they should
+be applied.
 
 The numbered task SQL files follow the processing order:
 
@@ -42,10 +41,9 @@ The numbered task SQL files follow the processing order:
 3. `database/004_upsert_silver_candle.sql` — store the normalized candle in
    Silver using `(symbol, interval, open_time)` as its idempotency key.
 
-The three task SQL files currently contain comments only for the database
-developer. Python task code contains no SQL queries. Bronze and Silver task
-writes will not work until those SQL statements and the Silver table are
-implemented.
+Python task code contains no inline SQL queries; it loads statements from the
+three task SQL files. Bronze inserts return the matching row ID on retries,
+and Silver upserts use `(symbol, interval, open_time)` as their idempotency key.
 
 `bronze.raw_market_events` stores event type, symbol, source, event and
 ingestion times, original JSONB payload, and Kafka topic/partition/offset. The
@@ -59,11 +57,10 @@ docker compose up -d postgres
 docker compose exec postgres sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -f /docker-entrypoint-initdb.d/001_initialize_database.sql'
 ```
 
-The database developer should add the `silver.candles` table definition to
-`001_initialize_database.sql`. It needs `symbol`, `interval`, `open_time`,
-`close_time`, OHLC price columns, `volume`, and `is_closed`; use `TIMESTAMPTZ`
-for the candle times, exact numeric types for prices and volume, and a unique
-or primary key on `(symbol, interval, open_time)`.
+`silver.candles` has `symbol`, `interval`, `open_time`, `close_time`, OHLC
+price columns, `volume`, and `is_closed`. Candle times use `TIMESTAMPTZ`,
+prices and volume use exact `NUMERIC`, and `(symbol, interval, open_time)` is
+the primary key.
 
 ## Compose startup
 

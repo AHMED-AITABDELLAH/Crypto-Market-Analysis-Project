@@ -28,13 +28,24 @@ CREATE INDEX IF NOT EXISTS idx_raw_market_events_symbol_event_time
 CREATE INDEX IF NOT EXISTS idx_raw_market_events_ingestion_time
     ON bronze.raw_market_events (ingestion_time);
 
--- TODO for the database developer:
--- Add the Silver table definitions to this initializer as they are agreed.
--- The first planned Silver table is silver.candles with symbol, interval,
--- open_time, close_time, open_price, high_price, low_price, close_price,
--- volume, and is_closed. Use TIMESTAMPTZ for candle times, exact numeric
--- types for price and volume, and a unique/primary key on
--- (symbol, interval, open_time). Keep its columns compatible with
--- database/004_upsert_silver_candle.sql.
--- Add future schema/table initialization here rather than creating one
--- initialization file per data layer or market-data type.
+-- Silver: normalized Binance candles. Unconstrained NUMERIC preserves the
+-- exact decimal strings received from Binance without imposing scale limits.
+-- CHECK constraints reject impossible values (non-positive prices, negative
+-- volume, inverted times or high/low) as a second safety net after ETL.
+CREATE TABLE IF NOT EXISTS silver.candles (
+    symbol TEXT NOT NULL,
+    interval TEXT NOT NULL,
+    open_time TIMESTAMPTZ NOT NULL,
+    close_time TIMESTAMPTZ NOT NULL,
+    open_price NUMERIC NOT NULL CHECK (open_price > 0),
+    high_price NUMERIC NOT NULL CHECK (high_price > 0),
+    low_price NUMERIC NOT NULL CHECK (low_price > 0),
+    close_price NUMERIC NOT NULL CHECK (close_price > 0),
+    volume NUMERIC NOT NULL CHECK (volume >= 0),
+    is_closed BOOLEAN NOT NULL,
+    PRIMARY KEY (symbol, interval, open_time),
+    CONSTRAINT ck_silver_candles_time_order CHECK (close_time > open_time),
+    CONSTRAINT ck_silver_candles_high_low CHECK (high_price >= low_price)
+);
+
+-- we can add tables for gold schema later, for example, aggregated metrics or analytics results.
