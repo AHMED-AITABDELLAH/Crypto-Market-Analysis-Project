@@ -1,0 +1,6 @@
+-- TODO for the database developer:
+-- Select id and payload from bronze.raw_market_events for the supplied
+-- raw_event_ids array parameter.
+-- Return one row per matching id, ordered by id, so
+-- scripts/realtime_kline_ingestion/task_03_etl_klines_to_silver.py can parse the original kline
+-- JSON payloads. Do not select unrelated Bronze events.

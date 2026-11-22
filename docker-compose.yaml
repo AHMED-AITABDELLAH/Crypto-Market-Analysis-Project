@@ -1,2 +1,166 @@
+x-airflow-common: &airflow-common
+  # Build Airflow with the Kafka provider needed by event-driven DAGs.
+  build:
+    context: ./airflow
+    dockerfile: Dockerfile
+  environment: &airflow-common-env
+    AIRFLOW__CORE__EXECUTOR: LocalExecutor
+    AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+    AIRFLOW__CORE__PARALLELISM: "2"
+    AIRFLOW__CORE__FERNET_KEY: ${AIRFLOW_FERNET_KEY:-pb2CDdYiRv2jPMnHA3WDUo5NDY7kHA3UjjSHS3ojH0I=}
+    AIRFLOW__CORE__SIMPLE_AUTH_MANAGER_USERS: admin:admin
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: "postgresql+psycopg2://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}?options=-csearch_path%3Dairflow_metadata"
+    AIRFLOW__DATABASE__SQL_ALCHEMY_SCHEMA: airflow_metadata
+    AIRFLOW__DAG_PROCESSOR__PARSING_PROCESSES: "1"
+    AIRFLOW__API__SECRET_KEY: ${AIRFLOW_API_SECRET_KEY:-3ugT6j8md4WzeuJB8kCRkha1KsibunlyS0hrxhMALIx81eYbyH1NquJxtB6HTdYp}
+    AIRFLOW__API_AUTH__JWT_SECRET: ${AIRFLOW_JWT_SECRET:-ADKB7QdZBsEp3YPbWJlLUL1QO7ichh24I76miFOJUaMzLzxRvWnKYyCQSObVn_oQ}
+    # Make root-level, purpose-grouped scripts importable by Airflow processes.
+    PYTHONPATH: /opt/airflow
+    DATABASE_URL: "postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}"
+    SQL_DIRECTORY: /opt/airflow/database
+    # Airflow's Kafka event trigger uses this connection on the Compose network.
+    AIRFLOW_CONN_KAFKA_DEFAULT: '{"conn_type":"kafka","extra":{"bootstrap.servers":"kafka:29092"}}'
+  volumes: &airflow-common-volumes
+    - ./airflow/dags:/opt/airflow/dags:ro
+    - ./airflow/logs:/opt/airflow/logs
+    - ./airflow/plugins:/opt/airflow/plugins:ro
+    # Mount root-level, purpose-grouped scripts for DAG and Triggerer imports.
+    - ./scripts:/opt/airflow/scripts:ro
+    - ./database:/opt/airflow/database:ro
+    - airflow_home:/opt/airflow
+  user: "${AIRFLOW_UID:-50000}:0"
+  depends_on:
+    postgres:
+      condition: service_healthy
+
 services:
-  
+  kafka:
+    image: apache/kafka:4.4.0
+    ports:
+      # Host tools can connect through localhost:9092.
+      - "9092:9092"
+    environment:
+      # Run Kafka in single-node KRaft mode (Kafka's built-in metadata mode).
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: INTERNAL://:29092,EXTERNAL://:9092,CONTROLLER://:9093
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka:29092,EXTERNAL://localhost:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT,CONTROLLER:PLAINTEXT
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+    healthcheck:
+      # Mark Kafka healthy only after the raw candle topic can be ensured.
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --create --if-not-exists --topic market.raw.spot.klines --partitions 1 --replication-factor 1"]
+      interval: 5s
+      timeout: 10s
+      retries: 12
+
+  postgres:
+    image: postgres:17
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:?Set POSTGRES_DB in .env}
+      POSTGRES_USER: ${POSTGRES_USER:?Set POSTGRES_USER in .env}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+    ports:
+      # Allow local database tools to connect from the host.
+      - "5432:5432"
+    volumes:
+      # Keep database files when containers are recreated.
+      - postgres_data:/var/lib/postgresql/data
+      # PostgreSQL runs this SQL file once when initializing an empty data volume.
+      - ./database/001_initialize_database.sql:/docker-entrypoint-initdb.d/001_initialize_database.sql:ro
+    healthcheck:
+      # Check TCP readiness so this passes after PostgreSQL's init scripts finish.
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U \"$$POSTGRES_USER\" -d \"$$POSTGRES_DB\""]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+  binance-websocket:
+    build:
+      context: ./services/binance
+      dockerfile: Dockerfile
+    environment:
+      # Containers reach each other by Compose service name, not localhost.
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+    depends_on:
+      kafka:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+    stop_signal: SIGINT
+    stop_grace_period: 15s
+
+  # Airflow's LocalExecutor runs tasks in the scheduler, so it needs no Redis
+  # broker and no separate Celery worker service.
+  airflow-init:
+    <<: *airflow-common
+    profiles: ["airflow"]
+    command: ["airflow", "db", "migrate"]
+    restart: "no"
+
+  airflow-api-server:
+    <<: *airflow-common
+    profiles: ["airflow"]
+    command: api-server
+    ports:
+      - "8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      airflow-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD-SHELL", "curl --fail http://localhost:8080/api/v2/monitor/health"]
+      interval: 10s
+      timeout: 10s
+      retries: 10
+      start_period: 30s
+    restart: unless-stopped
+
+  airflow-scheduler:
+    <<: *airflow-common
+    profiles: ["airflow"]
+    command: scheduler
+    depends_on:
+      postgres:
+        condition: service_healthy
+      airflow-init:
+        condition: service_completed_successfully
+      airflow-api-server:
+        condition: service_healthy
+    restart: unless-stopped
+
+  airflow-dag-processor:
+    <<: *airflow-common
+    profiles: ["airflow"]
+    command: dag-processor
+    depends_on:
+      postgres:
+        condition: service_healthy
+      airflow-init:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  airflow-triggerer:
+    <<: *airflow-common
+    profiles: ["airflow"]
+    command: triggerer
+    depends_on:
+      postgres:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+      airflow-init:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  airflow_home:

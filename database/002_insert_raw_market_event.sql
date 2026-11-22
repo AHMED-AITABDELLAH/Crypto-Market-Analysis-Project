@@ -1,0 +1,11 @@
+-- TODO for the database developer:
+-- Insert one validated Binance event into bronze.raw_market_events.
+-- Keep the original JSON object unchanged in the JSONB payload column.
+-- Populate event_type, symbol, source, event_time, ingestion_time, payload,
+-- kafka_topic, kafka_partition, and kafka_offset from the named parameters
+-- supplied by scripts/realtime_kline_ingestion/task_02_store_raw_events.py.
+--
+-- Make the operation safe to retry using the unique key
+-- (kafka_topic, kafka_partition, kafka_offset).
+-- Return the Bronze row's id both on a new insert and when that Kafka
+-- coordinate already exists; the task passes this id to the Silver ETL task.
