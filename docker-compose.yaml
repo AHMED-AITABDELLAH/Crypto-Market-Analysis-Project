@@ -5,6 +5,9 @@ x-airflow-common: &airflow-common
     dockerfile: Dockerfile
   environment: &airflow-common-env
     AIRFLOW__CORE__EXECUTOR: LocalExecutor
+    # Airflow 3 task processes in the scheduler must reach the API service by
+    # its Compose hostname, not localhost inside the scheduler container.
+    AIRFLOW__CORE__EXECUTION_API_SERVER_URL: http://airflow-api-server:8080/execution/
     AIRFLOW__CORE__LOAD_EXAMPLES: "false"
     AIRFLOW__CORE__PARALLELISM: "2"
     AIRFLOW__CORE__FERNET_KEY: ${AIRFLOW_FERNET_KEY:-pb2CDdYiRv2jPMnHA3WDUo5NDY7kHA3UjjSHS3ojH0I=}
@@ -19,7 +22,7 @@ x-airflow-common: &airflow-common
     DATABASE_URL: "postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}"
     SQL_DIRECTORY: /opt/airflow/database
     # Airflow's Kafka event trigger uses this connection on the Compose network.
-    AIRFLOW_CONN_KAFKA_DEFAULT: '{"conn_type":"kafka","extra":{"bootstrap.servers":"kafka:29092"}}'
+    AIRFLOW_CONN_KAFKA_DEFAULT: '{"conn_type":"kafka","extra":{"bootstrap.servers":"kafka:29092","group.id":"airflow-closed-kline-watcher","auto.offset.reset":"latest"}}'
   volumes: &airflow-common-volumes
     - ./airflow/dags:/opt/airflow/dags:ro
     - ./airflow/logs:/opt/airflow/logs

@@ -4,7 +4,14 @@ FROM apache/airflow:slim-3.4.0-python3.12
 # Keep Airflow core at the exact version provided by the base image while
 # installing only the Kafka event-trigger provider and its messaging extra.
 COPY requirements.txt /requirements.txt
+
+# Use Airflow's constraints for the Airflow core installation. Those
+# constraints pin Kafka provider 2.1.0, so install our newer compatible Kafka
+# provider in a second command while keeping Airflow itself pinned.
 RUN pip install --no-cache-dir \
     "apache-airflow==3.4.0" \
-    --constraint "https://raw.githubusercontent.com/apache/airflow/constraints-3.4.0/constraints-3.12.txt" \
+    --constraint "https://raw.githubusercontent.com/apache/airflow/constraints-3.4.0/constraints-3.12.txt"
+
+RUN pip install --no-cache-dir \
+    "apache-airflow==3.4.0" \
     -r /requirements.txt

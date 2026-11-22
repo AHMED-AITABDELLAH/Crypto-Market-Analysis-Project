@@ -28,13 +28,21 @@ CREATE INDEX IF NOT EXISTS idx_raw_market_events_symbol_event_time
 CREATE INDEX IF NOT EXISTS idx_raw_market_events_ingestion_time
     ON bronze.raw_market_events (ingestion_time);
 
--- TODO for the database developer:
--- Add the Silver table definitions to this initializer as they are agreed.
--- The first planned Silver table is silver.candles with symbol, interval,
--- open_time, close_time, open_price, high_price, low_price, close_price,
--- volume, and is_closed. Use TIMESTAMPTZ for candle times, exact numeric
--- types for price and volume, and a unique/primary key on
--- (symbol, interval, open_time). Keep its columns compatible with
--- database/004_upsert_silver_candle.sql.
--- Add future schema/table initialization here rather than creating one
--- initialization file per data layer or market-data type.
+-- Silver: one structured row per finalized symbol/interval/open-time candle.
+CREATE TABLE IF NOT EXISTS silver.candles (
+    symbol TEXT NOT NULL,
+    "interval" TEXT NOT NULL,
+    open_time TIMESTAMPTZ NOT NULL,
+    close_time TIMESTAMPTZ NOT NULL,
+    open_price NUMERIC NOT NULL,
+    high_price NUMERIC NOT NULL,
+    low_price NUMERIC NOT NULL,
+    close_price NUMERIC NOT NULL,
+    volume NUMERIC NOT NULL,
+    is_closed BOOLEAN NOT NULL,
+    CONSTRAINT pk_silver_candles
+        PRIMARY KEY (symbol, "interval", open_time)
+);
+
+-- Add future schema/table initialization statements to this file in order.
+-- Do not create a separate initializer for each data layer or market-data type.

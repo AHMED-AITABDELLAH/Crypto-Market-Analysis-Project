@@ -29,8 +29,6 @@ def _utc_datetime(milliseconds, name, raw_event_id):
 @task
 def etl_klines_to_silver(raw_event_ids):
     """Normalize stored kline payloads and upsert rows in ``silver.candles``.
-    The database team must create silver.candles with the columns referenced by
-    ``database/004_upsert_silver_candle.sql`` before this task can run successfully.
     """
     if not raw_event_ids:
         return 0
