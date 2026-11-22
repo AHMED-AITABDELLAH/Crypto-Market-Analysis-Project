@@ -104,13 +104,11 @@ services:
   # broker and no separate Celery worker service.
   airflow-init:
     <<: *airflow-common
-    profiles: ["airflow"]
     command: ["airflow", "db", "migrate"]
     restart: "no"
 
   airflow-api-server:
     <<: *airflow-common
-    profiles: ["airflow"]
     command: api-server
     ports:
       - "8080:8080"
@@ -129,7 +127,6 @@ services:
 
   airflow-scheduler:
     <<: *airflow-common
-    profiles: ["airflow"]
     command: scheduler
     depends_on:
       postgres:
@@ -142,7 +139,6 @@ services:
 
   airflow-dag-processor:
     <<: *airflow-common
-    profiles: ["airflow"]
     command: dag-processor
     depends_on:
       postgres:
@@ -153,7 +149,6 @@ services:
 
   airflow-triggerer:
     <<: *airflow-common
-    profiles: ["airflow"]
     command: triggerer
     depends_on:
       postgres:
