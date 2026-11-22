@@ -1,0 +1,3 @@
+# Dependances supplementaires pour Airflow.
+# L'image officielle contient deja : providers postgres, psycopg2, requests.
+# On ajoutera ici (plus tard) pandas, kafka-python, mlflow... quand les DAGs en auront besoin.
