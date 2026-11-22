@@ -1,39 +1,35 @@
--- Insert the original Binance event and its ingestion/Kafka traceability data.
--- If this Kafka coordinate was already inserted, return its existing Bronze ID
--- so Airflow retries can continue the Silver ETL without duplicating raw data.
-WITH inserted AS (
-    INSERT INTO bronze.raw_market_events (
-        event_type,
-        symbol,
-        source,
-        event_time,
-        ingestion_time,
-        payload,
-        kafka_topic,
-        kafka_partition,
-        kafka_offset
-    )
-    VALUES (
-        %(event_type)s,
-        %(symbol)s,
-        %(source)s,
-        %(event_time)s,
-        %(ingestion_time)s,
-        %(payload)s,
-        %(kafka_topic)s,
-        %(kafka_partition)s,
-        %(kafka_offset)s
-    )
-    ON CONFLICT (kafka_topic, kafka_partition, kafka_offset) DO NOTHING
-    RETURNING id
+-- Insert one validated Binance event into bronze.raw_market_events.
+-- The original JSON object is kept unchanged in the JSONB payload column.
+-- Named parameters are supplied by
+-- scripts/realtime_kline_ingestion/task_02_store_raw_events.py.
+--
+-- Safe to retry: the unique key (kafka_topic, kafka_partition, kafka_offset)
+-- prevents duplicate rows. RETURNING id gives the Bronze row id both for a
+-- new insert and when that Kafka coordinate already exists; the task passes
+-- this id to the Silver ETL task.
+INSERT INTO bronze.raw_market_events (
+    event_type,
+    symbol,
+    source,
+    event_time,
+    ingestion_time,
+    payload,
+    kafka_topic,
+    kafka_partition,
+    kafka_offset
 )
-SELECT id
-FROM inserted
-UNION ALL
-SELECT raw_event.id
-FROM bronze.raw_market_events AS raw_event
-WHERE raw_event.kafka_topic = %(kafka_topic)s
-  AND raw_event.kafka_partition = %(kafka_partition)s
-  AND raw_event.kafka_offset = %(kafka_offset)s
-  AND NOT EXISTS (SELECT 1 FROM inserted)
-LIMIT 1;
+VALUES (
+    %(event_type)s,
+    %(symbol)s,
+    %(source)s,
+    %(event_time)s,
+    %(ingestion_time)s,
+    %(payload)s,
+    %(kafka_topic)s,
+    %(kafka_partition)s,
+    %(kafka_offset)s
+)
+ON CONFLICT (kafka_topic, kafka_partition, kafka_offset)
+
+DO UPDATE SET kafka_offset = EXCLUDED.kafka_offset
+RETURNING id;
