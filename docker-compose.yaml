@@ -94,7 +94,11 @@ services:
     depends_on:
       kafka:
         condition: service_healthy
-      postgres:
+      # The Triggerer health check confirms the Kafka watcher has joined its
+      # consumer group; the scheduler check confirms it can create and run DAGs.
+      airflow-triggerer:
+        condition: service_healthy
+      airflow-scheduler:
         condition: service_healthy
     restart: unless-stopped
     stop_signal: SIGINT
@@ -135,6 +139,13 @@ services:
         condition: service_completed_successfully
       airflow-api-server:
         condition: service_healthy
+    # Report healthy only after Airflow has a live SchedulerJob heartbeat.
+    healthcheck:
+      test: ["CMD-SHELL", "airflow jobs check --job-type SchedulerJob --local"]
+      interval: 10s
+      timeout: 10s
+      retries: 12
+      start_period: 30s
     restart: unless-stopped
 
   airflow-dag-processor:
@@ -157,6 +168,22 @@ services:
         condition: service_healthy
       airflow-init:
         condition: service_completed_successfully
+    # A running Triggerer process alone does not prove its Kafka watcher is
+    # ready. Check that the watcher consumer group has an active member.
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - >-
+          from confluent_kafka.admin import AdminClient;
+          admin = AdminClient({"bootstrap.servers": "kafka:29092"});
+          group = admin.describe_consumer_groups(["airflow-closed-kline-watcher"])["airflow-closed-kline-watcher"].result(5);
+          assert group.members, "Airflow Kafka watcher has not joined its consumer group"
+      interval: 5s
+      timeout: 10s
+      retries: 24
+      start_period: 10s
     restart: unless-stopped
 
 volumes:
