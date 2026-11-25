@@ -50,7 +50,7 @@ closed_kline_asset = Asset(
                 apply_function=KAFKA_FILTER_FUNCTION,
                 kafka_config_id=KAFKA_CONNECTION_ID,
                 poll_timeout=1,
-                poll_interval=5,
+                poll_interval=2,
             ),
         )
     ],
